@@ -37,12 +37,38 @@ namespace WandEnhancer.View.MainWindow
             }
 
             Log(LocalizationManager.Format("log_install_found", config, config.ExecutableName), ELogType.Success);
-            AlreadyPatched = Enhancer.IsPatched(config.RootDirectory);
-            CanRestore = Enhancer.HasBackup(config.RootDirectory);
-            IsPatchEnabled = !AlreadyPatched;
+            RefreshInstallState();
+            LogInstallState();
 
             Log(LocalizationManager.Get(AlreadyPatched ? "log_already_patched" : "log_ready"),
                 AlreadyPatched ? ELogType.Warn : ELogType.Info);
+        }
+
+        // Re-read the disk after every operation, including failed rollback/restore.
+        // Task.Run must not update WPF properties from its worker thread.
+        private void RefreshInstallState()
+        {
+            AlreadyPatched = WeModInfo != null && Enhancer.IsPatched(WeModInfo.RootDirectory);
+            CanRestore = WeModInfo != null && Enhancer.HasBackup(WeModInfo.RootDirectory);
+            IsPatchEnabled = WeModInfo != null && !AlreadyPatched;
+            System.Windows.Input.CommandManager.InvalidateRequerySuggested();
+        }
+
+        private void LogInstallState()
+        {
+            if (WeModInfo == null) return;
+            string resources = Path.Combine(WeModInfo.RootDirectory, "resources");
+            bool archiveBackup = File.Exists(Path.Combine(resources, "app.asar.backup"));
+            bool unpackedBackup = Directory.Exists(Path.Combine(resources, "app.asar.unpacked.backup"));
+            bool unfinished = File.Exists(Path.Combine(resources, ".incomplete-patch"));
+            Log($"Install state: archive backup={archiveBackup}, unpacked backup={unpackedBackup}, " +
+                $"unfinished operation={unfinished}. This state does not verify trainer compatibility.", ELogType.Info);
+            if (archiveBackup != unpackedBackup)
+                Log("Backup is incomplete. Restore requires both backups; reinstall the official client " +
+                    "if the missing original files cannot be recovered.", ELogType.Warn);
+            if (unfinished)
+                Log("An unfinished operation was detected. Export the log before retrying; " +
+                    "use Restore if a complete backup is available.", ELogType.Warn);
         }
 
         private bool _isPatchEnabled;
@@ -96,6 +122,7 @@ namespace WandEnhancer.View.MainWindow
 
         private void OnFolderPathSelection(object obj)
         {
+            if (IsBusy) return;
             string selectedPath = _dialogs.PickFolder(
                 LocalizationManager.Get("dialog_pick_install"),
                 Environment.GetEnvironmentVariable("LOCALAPPDATA"));
@@ -117,64 +144,63 @@ namespace WandEnhancer.View.MainWindow
         // Runs off the UI thread due to heavy file IO.
         private async void OnBackupRestoring(object param)
         {
+            if (IsBusy) return;
             if (WeModInfo == null)
             {
                 Log(LocalizationManager.Get("log_no_directory"), ELogType.Warn);
                 return;
             }
 
+            var install = WeModInfo;
             IsBusy = true;
-            bool restored = await Task.Run(() =>
+            try
             {
-                try
-                {
-                    new Enhancer(WeModInfo, Log).Restore();
-                    return true;
-                }
-                catch (Exception e)
-                {
-                    Log(LocalizationManager.Format("log_restore_failed", e.Message), ELogType.Error);
-                    return false;
-                }
-            });
-
-            IsBusy = false;
-            if (restored)
+                await Task.Run(() => new Enhancer(install, Log).Restore());
+            }
+            catch (Exception e)
             {
-                AlreadyPatched = false;
-                CanRestore = false;
-                IsPatchEnabled = true;
+                Log(LocalizationManager.Format("log_restore_failed", e.Message), ELogType.Error);
+                Log(e.ToString(), ELogType.Error);
+            }
+            finally
+            {
+                IsBusy = false;
+                RefreshInstallState();
+                LogInstallState();
             }
         }
 
         private void OnPatching(object param)
         {
+            if (IsBusy) return;
             if (WeModInfo == null)
             {
                 Log(LocalizationManager.Get("log_no_directory"), ELogType.Warn);
                 return;
             }
 
+            var install = WeModInfo;
             _shell.OpenPopup(new PatchVectorsPopup(async config =>
             {
+                if (IsBusy) return;
                 _shell.ClosePopup();
                 IsPatchEnabled = false;
                 IsBusy = true;
-                await Task.Run(() =>
+                try
                 {
-                    try
-                    {
-                        new Enhancer(WeModInfo, Log, config).Patch();
-                        AlreadyPatched = true;
-                        CanRestore = true;
-                    }
-                    catch (Exception e)
-                    {
-                        Log(LocalizationManager.Format("log_patch_failed", e.Message), ELogType.Error);
-                        IsPatchEnabled = true;
-                    }
-                });
-                IsBusy = false;
+                    await Task.Run(() => new Enhancer(install, Log, config).Patch());
+                }
+                catch (Exception e)
+                {
+                    Log(LocalizationManager.Format("log_patch_failed", e.Message), ELogType.Error);
+                    Log(e.ToString(), ELogType.Error);
+                }
+                finally
+                {
+                    IsBusy = false;
+                    RefreshInstallState();
+                    LogInstallState();
+                }
             }), LocalizationManager.Get("pv_popup_title"));
         }
 
@@ -185,7 +211,7 @@ namespace WandEnhancer.View.MainWindow
                 var entry = new LogEntry
                 {
                     LogType = logType,
-                    Message = $"[{logType.ToString().ToUpper()}] {message}"
+                    Message = $"{DateTime.Now:HH:mm:ss.fff} [{logType.ToString().ToUpperInvariant()}] {message}"
                 };
                 LogList.Add(entry);
                 _shell.ScrollLogIntoView(entry);
@@ -202,11 +228,49 @@ namespace WandEnhancer.View.MainWindow
         private string BuildLogReport()
         {
             var builder = new StringBuilder();
+            builder.AppendLine("Wand Enhancer recovery diagnostic report");
+            builder.AppendLine("Enhancer assembly: " + typeof(MainWindowVm).Assembly.GetName().Version);
+            builder.AppendLine("Exported: " + DateTimeOffset.Now.ToString("O"));
+            builder.AppendLine("Selected installation: " + (WeModInfo?.RootDirectory ?? "none"));
+            builder.AppendLine("State: already patched=" + AlreadyPatched + "; restore available=" + CanRestore);
+            builder.AppendLine("The state above does not confirm that game mods loaded successfully.");
+            builder.AppendLine();
             foreach (var entry in LogList)
             {
                 builder.AppendLine(entry.Message);
             }
-            return builder.ToString();
+            // Include only a bounded tail of the launcher logs; never account/storage dumps.
+            if (WeModInfo != null)
+            {
+                string launcherDirectory = WandEnhancer.Core.Patching.Shared.LauncherDeployment.SquirrelRootOf(WeModInfo);
+                foreach (string name in new[] { LauncherLog.FileName, LauncherLog.PreviousFileName })
+                {
+                    string path = Path.Combine(launcherDirectory, name);
+                    builder.AppendLine();
+                    builder.AppendLine("--- " + name + " ---");
+                    try
+                    {
+                        if (!File.Exists(path)) { builder.AppendLine("Not present."); continue; }
+                        using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                        {
+                            if (stream.Length > 64 * 1024)
+                            {
+                                stream.Seek(-64 * 1024, SeekOrigin.End);
+                                builder.AppendLine("[Last 64 KiB only]");
+                            }
+                            using (var reader = new StreamReader(stream, Encoding.UTF8))
+                                builder.AppendLine(reader.ReadToEnd());
+                        }
+                    }
+                    catch (Exception e) when (e is IOException || e is UnauthorizedAccessException)
+                    {
+                        builder.AppendLine("Could not read this log: " + e.Message);
+                    }
+                }
+            }
+            string report = builder.ToString();
+            string profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            return string.IsNullOrEmpty(profile) ? report : report.Replace(profile, "%USERPROFILE%");
         }
 
         private void OnCopyLogs(object param)

@@ -61,7 +61,7 @@
 
     <!--#region Runtime log -->
     <s:String x:Key="log_install_found">WeMod directory found at {0} ({1})</s:String>
-    <s:String x:Key="log_already_patched">WeMod already patched. If you want to patch again, please restore the backup first.</s:String>
+    <s:String x:Key="log_already_patched">Existing patch backups detected. No new patch was attempted. Restore is available if you need to return to the original client.</s:String>
     <s:String x:Key="log_ready">Ready for patching.</s:String>
     <s:String x:Key="log_install_not_found">WeMod directory not found.</s:String>
     <s:String x:Key="log_no_directory">Cant be done. Please specify the directory first.</s:String>
