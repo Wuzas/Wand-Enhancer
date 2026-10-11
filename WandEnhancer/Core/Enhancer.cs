@@ -7,6 +7,7 @@ using AsarSharp;
 using WandEnhancer.Core.Patching.Content;
 using WandEnhancer.Core.Patching.Shared;
 using WandEnhancer.Core.Patching.Strategies;
+using WandEnhancer.Core.Patching.Strategies.Static;
 using WandEnhancer.Models;
 using WandEnhancer.Utils;
 
@@ -145,6 +146,7 @@ namespace WandEnhancer.Core
 
             // Start from a pristine executable to not inherit a broken signature from prior static patches.
             DiskFusePatch.Remove(_weModConfig.ExecutablePath, _logger);
+            AsarIntegrityResourcePatch.Restore(_weModConfig.ExecutablePath, _asarPath, _logger);
 
             // Never leave a patched archive behind without its launcher.
             try
@@ -155,16 +157,31 @@ namespace WandEnhancer.Core
                 PackSources();
                 _strategy.ApplyEnablement(new PatchContext(_weModConfig, _logger, _unpackedPath));
 
-                // Supervised needs its launcher at every start; static only to re-apply on update.
-                if (_strategy.RequiresLauncherAlways || _config.AutoApplyAfterUpdate)
+                // Supervised needs to intercept every start; static never does.
+                if (_strategy.RequiresLauncherAlways)
                 {
                     LauncherDeployment.Deploy(_weModConfig, _logger);
-                    SaveAutoPatchConfig();
                 }
                 else
                 {
                     LauncherDeployment.Restore(_weModConfig);
+                }
+
+                // Independent of the strategy: catching an update needs to run the moment Squirrel
+                // writes a new version folder, not on next launch. Squirrel rewrites the root
+                // execution stub as part of applying the update itself, so by the time the user
+                // next starts Wand - through either strategy's own launcher interception - that
+                // rewrite has already erased it. UpdateWatcherService runs independently of launch
+                // timing entirely.
+                if (_config.AutoApplyAfterUpdate)
+                {
+                    SaveAutoPatchConfig();
+                    Services.WatcherAutostart.EnsureRunning(_weModConfig, _logger);
+                }
+                else
+                {
                     DeleteAutoPatchConfig();
+                    Services.WatcherAutostart.Stop(_weModConfig);
                 }
 
                 File.Delete(markerPath);
@@ -290,6 +307,7 @@ namespace WandEnhancer.Core
                 // Undo on-disk fuse and launcher deployment to prevent a tampered unlaunchable Wand.
                 LauncherDeployment.Restore(_weModConfig);
                 DiskFusePatch.Remove(_weModConfig.ExecutablePath, _logger);
+                AsarIntegrityResourcePatch.Restore(_weModConfig.ExecutablePath, _asarPath, _logger);
 
                 _logger("[ENHANCER] Patch failed - the original Wand files were restored.", ELogType.Warn);
             }
@@ -327,6 +345,7 @@ namespace WandEnhancer.Core
             // Undo all footprints at once: launcher stub and on-disk fuse.
             LauncherDeployment.Restore(_weModConfig);
             DiskFusePatch.Remove(_weModConfig.ExecutablePath, _logger);
+            AsarIntegrityResourcePatch.Restore(_weModConfig.ExecutablePath, _asarPath, _logger);
 
             string squirrelRoot = SquirrelRoot;
             foreach (var leftover in new[]
